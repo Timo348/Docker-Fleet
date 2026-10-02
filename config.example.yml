@@ -1,0 +1,50 @@
+version: 1
+server:
+  host: 0.0.0.0
+  port: 8443
+  tls:
+    certFile: /secrets/backend/server.pem
+    keyFile: /secrets/backend/server.key
+    proxyCaFile: /secrets/ca-public/proxy-ca.pem
+    allowedProxyNames: [fleet-proxy]
+baseUrl: https://docker.example.invalid
+auth:
+  mode: proxy
+  usernameHeader: x-fleet-user
+  subjectHeader: x-fleet-subject
+  allowedUsers: [replace-with-your-authentik-username]
+  csrfSecretFile: /secrets/csrf-secret
+credentials:
+  local-agent:
+    caFile: /secrets/ca-public/agent-ca.pem
+    certFile: /secrets/clients/local-agent/client.pem
+    keyFile: /secrets/clients/local-agent/client.key
+    serverName: local-agent
+hosts:
+  - id: host-1
+    name: Host 1
+    agentUrl: https://local-agent:9443
+    enabled: true
+    credentialRef: local-agent
+    timeoutMs: 5000
+  # Replace this URL, create host-2 credentials, then enable in Hosts / Settings.
+  - id: host-2
+    name: Host 2
+    agentUrl: https://agent-2.example.invalid:9443
+    enabled: false
+    credentialRef: local-agent
+    timeoutMs: 5000
+polling:
+  inventoryMs: 15000
+  statsMs: 5000
+logs:
+  defaultTail: 200
+  maxTail: 5000
+  maxBufferBytes: 2097152
+  maxLineBytes: 65536
+  maxStreamsPerUser: 2
+  maxStreamsTotal: 8
+  maxStreamSeconds: 600
+storage:
+  dataDir: /data
+  auditMaxBytes: 10485760

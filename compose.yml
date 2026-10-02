@@ -1,0 +1,90 @@
+name: docker-fleet
+services:
+  app:
+    image: ${FLEET_IMAGE:-timo348/docker-fleet:1.0.0}
+    build: .
+    command: ['node', 'dist/server/index.js']
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=16m, mode=1777]
+    environment:
+      CONFIG_FILE: /config/${CONFIG_NAME:-config.yml}
+      HEALTHCHECK_SERVER_NAME: ${APP_TLS_NAME:-fleet-server}
+    volumes:
+      # Mount the directory, because atomic saves replace the file by rename.
+      - ./runtime/config:/config
+      - ./runtime/data:/data
+      - ./secrets/backend:/secrets/backend:ro
+      - ./secrets/clients:/secrets/clients:ro
+      - ./secrets/ca-public:/secrets/ca-public:ro
+      - ./secrets/csrf-secret:/secrets/csrf-secret:ro
+    networks:
+      - agents
+      - proxy
+    depends_on:
+      local-agent:
+        condition: service_started
+    healthcheck:
+      test: ['CMD', 'node', 'scripts/healthcheck.mjs', 'server']
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+
+  local-agent:
+    image: ${FLEET_IMAGE:-timo348/docker-fleet:1.0.0}
+    build: .
+    command: ['node', 'dist/agent/index.js']
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=16m, mode=1777]
+    # Set this to `stat -c '%g' /var/run/docker.sock` on the Docker host.
+    group_add: ['${DOCKER_GID:?Set DOCKER_GID to the Docker socket group ID}']
+    environment:
+      AGENT_HOST_ID: ${LOCAL_HOST_ID:-host-1}
+      AGENT_BIND: 0.0.0.0
+      AGENT_PORT: 9443
+      DOCKER_SOCKET: /var/run/docker.sock
+      AGENT_TLS_CA: /secrets/ca-public/agent-ca.pem
+      AGENT_TLS_CERT: /secrets/agent/server.pem
+      AGENT_TLS_KEY: /secrets/agent/server.key
+      AGENT_ALLOWED_CLIENT_NAMES: ${LOCAL_AGENT_CLIENT_NAMES:-fleet-backend-local-agent}
+      AGENT_MAX_STREAMS: 4
+      AGENT_MAX_LOG_BYTES: 2097152
+      AGENT_MAX_LINE_BYTES: 65536
+      AGENT_MAX_TAIL: 5000
+      AGENT_STREAM_SECONDS: 600
+      HEALTHCHECK_SERVER_NAME: ${LOCAL_AGENT_TLS_NAME:-local-agent}
+    volumes:
+      # Socket access grants administrative Docker API access even with :ro.
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+      - ./secrets/agents/local-agent:/secrets/agent:ro
+      - ./secrets/ca-public:/secrets/ca-public:ro
+    networks: [agents]
+    healthcheck:
+      test: ['CMD', 'node', 'scripts/healthcheck.mjs', 'agent']
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+
+networks:
+  agents:
+    internal: true
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-proxy}
+# No host ports are published. The existing reverse proxy joins `proxy` and
+# reaches https://app:8443 using its client certificate.

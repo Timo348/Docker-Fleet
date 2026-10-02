@@ -1,0 +1,20 @@
+{
+  "status": "passed",
+  "date": "2026-10-02T06:49:10.892Z",
+  "tooling": {
+    "node": "24.18.1",
+    "dockerEngine": "29.6.1",
+    "isolatedTestEngine": "29.8.2"
+  },
+  "checks": [
+    "Two isolated Docker daemons and genuine resources",
+    "Same-name resource action isolation",
+    "Start, stop, restart and request deduplication",
+    "Anonymous agent, foreign Origin and CSRF rejection",
+    "TTY and multiplexed stdout/stderr logs and live cancellation",
+    "Configuration persistence and conflict rejection",
+    "Host outage isolation and stale snapshot",
+    "Audit privacy",
+    "Desktop/mobile browser checks"
+  ]
+}

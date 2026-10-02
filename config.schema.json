@@ -1,0 +1,145 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://docker-fleet.local/config-v1.schema.json",
+  "title": "Docker Fleet configuration version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "server",
+    "baseUrl",
+    "auth",
+    "credentials",
+    "hosts",
+    "polling",
+    "logs",
+    "storage"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["certFile", "keyFile", "proxyCaFile", "allowedProxyNames"],
+          "properties": {
+            "certFile": { "$ref": "#/definitions/path" },
+            "keyFile": { "$ref": "#/definitions/path" },
+            "proxyCaFile": { "$ref": "#/definitions/path" },
+            "allowedProxyNames": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": { "$ref": "#/definitions/name" }
+            }
+          }
+        }
+      }
+    },
+    "baseUrl": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "usernameHeader", "subjectHeader", "allowedUsers", "csrfSecretFile"],
+      "properties": {
+        "mode": { "enum": ["proxy", "development"] },
+        "usernameHeader": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,64}$" },
+        "subjectHeader": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,64}$" },
+        "allowedUsers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/name" }
+        },
+        "csrfSecretFile": { "$ref": "#/definitions/path" }
+      }
+    },
+    "credentials": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["caFile", "certFile", "keyFile"],
+        "properties": {
+          "caFile": { "$ref": "#/definitions/path" },
+          "certFile": { "$ref": "#/definitions/path" },
+          "keyFile": { "$ref": "#/definitions/path" },
+          "serverName": { "$ref": "#/definitions/name" }
+        }
+      }
+    },
+    "hosts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/definitions/host" } },
+    "polling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inventoryMs", "statsMs"],
+      "properties": {
+        "inventoryMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
+        "statsMs": { "type": "integer", "minimum": 500, "maximum": 600000 }
+      }
+    },
+    "logs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultTail",
+        "maxTail",
+        "maxBufferBytes",
+        "maxLineBytes",
+        "maxStreamsPerUser",
+        "maxStreamsTotal",
+        "maxStreamSeconds"
+      ],
+      "properties": {
+        "defaultTail": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "maxTail": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "maxBufferBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 },
+        "maxLineBytes": { "type": "integer", "minimum": 256, "maximum": 65536 },
+        "maxStreamsPerUser": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "maxStreamsTotal": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "maxStreamSeconds": { "type": "integer", "minimum": 10, "maximum": 3600 }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataDir", "auditMaxBytes"],
+      "properties": {
+        "dataDir": { "$ref": "#/definitions/path" },
+        "auditMaxBytes": { "type": "integer", "minimum": 1024, "maximum": 1073741824 }
+      }
+    }
+  },
+  "definitions": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^\\x00-\\x1f\\x7f]+$"
+    },
+    "path": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\x00]+$" },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "agentUrl", "enabled", "credentialRef", "timeoutMs"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$" },
+        "name": { "$ref": "#/definitions/name" },
+        "agentUrl": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "enabled": { "type": "boolean" },
+        "credentialRef": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$" },
+        "timeoutMs": { "type": "integer", "minimum": 200, "maximum": 120000 }
+      }
+    }
+  }
+}

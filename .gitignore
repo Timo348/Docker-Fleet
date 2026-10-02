@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-web/
+coverage/
+playwright-report/
+test-results/
+runtime/
+secrets/
+*.pem
+*.key
+.env
+*.log
+*.zip
