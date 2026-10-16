@@ -6,6 +6,8 @@ import { Readable } from 'node:stream';
 import type {
   Action,
   AppConfig,
+  ComposeFileResponse,
+  ComposeSaveResponse,
   Container,
   HostConfig,
   Image,
@@ -13,6 +15,11 @@ import type {
   Stats,
   Volume,
 } from '../shared/types.js';
+import {
+  ALLOWED_COMPOSE_FILENAMES,
+  MAX_COMPOSE_BYTES,
+  isValidComposeProjectName,
+} from '../shared/compose.js';
 import { AgentError } from './errors.js';
 
 export interface AgentTransport {
@@ -33,6 +40,18 @@ export interface AgentTransport {
     follow: boolean,
     signal: AbortSignal,
   ): Promise<Readable>;
+  getCompose(host: HostConfig, id: string): Promise<ComposeFileResponse>;
+  saveCompose(
+    host: HostConfig,
+    id: string,
+    input: {
+      requestId: string;
+      actor: string;
+      content: string;
+      redeploy: boolean;
+      expectedRevision?: string;
+    },
+  ): Promise<ComposeSaveResponse>;
   close?(): void;
 }
 
@@ -258,7 +277,64 @@ const knownFailures: Record<string, { message: string; status: number; uncertain
     status: 502,
   },
   INVALID_INPUT: { message: 'The agent rejected invalid request parameters.', status: 400 },
+  COMPOSE_NOT_FOUND: {
+    message: 'This container does not belong to a Docker Compose stack.',
+    status: 404,
+  },
+  COMPOSE_FILE_MISSING: {
+    message: 'The Docker Compose file could not be found on the remote host.',
+    status: 404,
+  },
+  COMPOSE_PATH_FORBIDDEN: {
+    message: 'Access to the requested Compose file path is forbidden.',
+    status: 403,
+  },
+  COMPOSE_CONFLICT: {
+    message: 'The Compose file was modified on disk. Reload before saving.',
+    status: 409,
+  },
+  INVALID_COMPOSE_YAML: {
+    message: 'The Compose file contains invalid YAML or structure.',
+    status: 400,
+  },
+  COMPOSE_DEPLOY_FAILED: {
+    message:
+      'The Compose file was saved, but docker compose up -d failed on the host. Check stack configuration.',
+    status: 502,
+    uncertain: true,
+  },
 };
+
+const allowedComposeNames = new Set<string>(ALLOWED_COMPOSE_FILENAMES);
+
+export function parseComposeFile(value: unknown): ComposeFileResponse {
+  const entry = record(value);
+  const project = string(entry.project, 63);
+  if (!isValidComposeProjectName(project)) badResponse();
+  const service = nullableString(entry.service, 128);
+  const fileName = string(entry.fileName, 64);
+  if (!allowedComposeNames.has(fileName)) badResponse();
+  const content = string(entry.content, MAX_COMPOSE_BYTES);
+  const revision = string(entry.revision, 128);
+  return { project, service, fileName, content, revision };
+}
+
+export function parseComposeSave(value: unknown): ComposeSaveResponse {
+  const entry = record(value);
+  if (entry.ok !== true || typeof entry.redeployed !== 'boolean') badResponse();
+  const project = string(entry.project, 63);
+  if (!isValidComposeProjectName(project)) badResponse();
+  const fileName = string(entry.fileName, 64);
+  if (!allowedComposeNames.has(fileName)) badResponse();
+  const revision = string(entry.revision, 128);
+  return {
+    ok: true,
+    project,
+    fileName,
+    revision,
+    redeployed: entry.redeployed,
+  };
+}
 
 export class HttpsAgentTransport implements AgentTransport {
   private agents = new Map<string, https.Agent>();
@@ -331,8 +407,14 @@ export class HttpsAgentTransport implements AgentTransport {
                   chunks.push(data);
                 }
                 let code: unknown;
+                let agentMessage: unknown;
                 try {
-                  code = JSON.parse(Buffer.concat(chunks).toString('utf8')).code;
+                  const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+                    code?: unknown;
+                    message?: unknown;
+                  };
+                  code = parsed.code;
+                  agentMessage = parsed.message;
                 } catch {
                   /* Unknown responses receive a generic safe message. */
                 }
@@ -340,10 +422,18 @@ export class HttpsAgentTransport implements AgentTransport {
                   typeof code === 'string' && Object.hasOwn(knownFailures, code)
                     ? knownFailures[code]
                     : undefined;
+                const customValidationMsg =
+                  code === 'INVALID_COMPOSE_YAML' &&
+                  typeof agentMessage === 'string' &&
+                  agentMessage.length > 0 &&
+                  agentMessage.length <= 512 &&
+                  !/[\x00-\x1f\x7f]/.test(agentMessage)
+                    ? agentMessage
+                    : undefined;
                 reject(
                   known
                     ? new AgentError(
-                        known.message,
+                        customValidationMsg || known.message,
                         String(code),
                         !!payload && !!known.uncertain,
                         known.status,
@@ -455,6 +545,30 @@ export class HttpsAgentTransport implements AgentTransport {
         'ACTION_RESULT_UNKNOWN',
         true,
       );
+  }
+  async getCompose(host: HostConfig, id: string): Promise<ComposeFileResponse> {
+    return parseComposeFile(await this.json(host, `/v1/containers/${id}/compose`));
+  }
+  async saveCompose(
+    host: HostConfig,
+    id: string,
+    input: {
+      requestId: string;
+      actor: string;
+      content: string;
+      redeploy: boolean;
+      expectedRevision?: string;
+    },
+  ): Promise<ComposeSaveResponse> {
+    return parseComposeSave(
+      await this.json(host, `/v1/containers/${id}/compose`, {
+        requestId: input.requestId,
+        actor: input.actor,
+        content: input.content,
+        redeploy: input.redeploy,
+        ...(input.expectedRevision ? { expectedRevision: input.expectedRevision } : {}),
+      }),
+    );
   }
   async logs(
     host: HostConfig,

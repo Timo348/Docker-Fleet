@@ -9,7 +9,7 @@ RUN npm run build
 FROM node:24-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
-RUN addgroup -g 10001 fleet && adduser -D -u 10001 -G fleet fleet
+RUN apk add --no-cache docker-cli docker-cli-compose && addgroup -g 10001 fleet && adduser -D -u 10001 -G fleet fleet
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build --chown=10001:10001 /app/dist ./dist

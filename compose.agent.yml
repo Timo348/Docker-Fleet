@@ -27,6 +27,7 @@ services:
       AGENT_MAX_LINE_BYTES: ${AGENT_MAX_LINE_BYTES:-65536}
       AGENT_MAX_TAIL: ${AGENT_MAX_TAIL:-5000}
       AGENT_STREAM_SECONDS: ${AGENT_STREAM_SECONDS:-600}
+      AGENT_COMPOSE_DIR: ${AGENT_COMPOSE_DIR:-}
       HEALTHCHECK_SERVER_NAME: ${AGENT_TLS_NAME:?Set the DNS name in the agent certificate SAN}
     volumes:
       - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock

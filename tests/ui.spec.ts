@@ -36,6 +36,19 @@ test('two-host resources, filters, navigation, logs and host configuration', asy
   expect((await downloaded).suggestedFilename()).toContain('logs-one-same-name');
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page
+    .getByRole('button', { name: 'Edit Compose for same-name on Test Host one', exact: true })
+    .click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await expect(page.getByTestId('monaco-compose-editor')).toBeVisible();
+  await page
+    .getByLabel('Compose YAML content')
+    .fill('services:\n  worker:\n    image: alpine:3.23\n    restart: unless-stopped\n');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByText(/unsaved changes/i)).toBeVisible();
+  await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
+  await page.getByRole('button', { name: 'Save only', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.getByRole('button', { name: 'Hosts & settings', exact: true }).click();
   await page.getByRole('button', { name: 'Add host', exact: true }).click();
   await page.getByLabel('Host ID', { exact: true }).fill('disabled-new');

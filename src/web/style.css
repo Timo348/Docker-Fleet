@@ -485,7 +485,7 @@ td small {
 .row-actions {
   padding: 7px 8px;
   text-align: right;
-  min-width: 114px;
+  min-width: 144px;
 }
 .row-actions .icon-button {
   margin-left: 1px;
@@ -819,6 +819,122 @@ footer > span:first-child {
   align-items: center;
   gap: 6px;
 }
+.compose-dialog {
+  width: min(1160px, 95vw);
+  height: min(760px, 90dvh);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: #101721;
+  border: 1px solid #3c4b5f;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.compose-dirty-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: #ffd080;
+  background: #3a2c12;
+  border: 1px solid #634a1e;
+  padding: 2px 6px;
+  border-radius: 3px;
+  margin-left: 4px;
+}
+.compose-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 14px;
+  border-bottom: 1px solid #303b49;
+  background: #131b26;
+}
+.compose-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: #9fb2c8;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.compose-toolbar button {
+  font-size: 11px;
+  min-height: 28px;
+}
+.compose-dialog .message {
+  margin: 10px 14px 0;
+}
+.compose-unsaved-warning {
+  flex-wrap: wrap;
+}
+.compose-warning-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.danger-button {
+  background: #4b1d1b;
+  border-color: #7c3531;
+  color: #ffdad4;
+}
+.danger-button:hover:not(:disabled) {
+  background: #612623;
+  border-color: #9e4540;
+}
+.compose-editor-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: #0b111a;
+  display: flex;
+  flex-direction: column;
+}
+.compose-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #8fa0b8;
+  padding: 24px;
+}
+.compose-monaco-host {
+  flex: 1;
+  width: 100%;
+  min-height: 240px;
+}
+.compose-sr-textarea {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: pre;
+  border: 0;
+}
+.compose-foot {
+  border-top: 1px solid #303b49;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #131a24;
+  font-size: 11px;
+}
+.compose-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
+}
 @media (max-width: 1050px) {
   .topbar {
     gap: 15px;
@@ -919,16 +1035,26 @@ footer > span:first-child {
   .overlay {
     padding: 10px;
   }
-  .log-dialog {
+  .log-dialog,
+  .compose-dialog {
     width: 100%;
     height: calc(100dvh - 20px);
   }
   .dialog-heading {
     padding: 12px;
   }
-  .log-toolbar {
+  .log-toolbar,
+  .compose-toolbar {
     padding: 9px;
     gap: 6px;
+  }
+  .compose-foot {
+    flex-wrap: wrap;
+    padding: 9px;
+  }
+  .compose-actions {
+    width: 100%;
+    justify-content: flex-end;
   }
   .log-line {
     display: block;

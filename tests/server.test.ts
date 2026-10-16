@@ -6,6 +6,7 @@ import { createServer } from '../src/server/app.js';
 import { AgentError } from '../src/server/errors.js';
 import { parseSnapshot } from '../src/server/agent-client.js';
 import { cleanLogText } from '../src/server/logs.js';
+import { validateComposeYaml } from '../src/shared/compose.js';
 import { containerId, FakeTransport, fixture, snapshot } from './server-fixtures.js';
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -318,5 +319,162 @@ describe('central backend security and host isolation', () => {
     expect(JSON.stringify(result)).not.toContain('PASSWORD');
     expect(result.containers[0].cpuPercent).toBeNull();
     expect(result.containers[0].memoryBytes).toBeNull();
+  });
+});
+
+describe('central backend Compose API, YAML validation, stack isolation and audit logging', () => {
+  it('validates Compose YAML syntax, structure and sanitization rules', () => {
+    const valid = validateComposeYaml(
+      'name: demo\nservices:\n  web:\n    image: nginx:alpine\n    ports:\n      - "8080:80"\n',
+    );
+    expect(valid.valid).toBe(true);
+    expect(valid.services).toEqual(['web']);
+
+    expect(validateComposeYaml('').valid).toBe(false);
+    expect(validateComposeYaml('services:\n  web:\n    image: "a\0b"\n').valid).toBe(false);
+    expect(validateComposeYaml('services:\n  web:\n    image: [unclosed\n').message).toContain(
+      'Invalid YAML',
+    );
+    expect(validateComposeYaml('version: "3"\n').message).toContain('"services"');
+    expect(validateComposeYaml('services: {}\n').message).toContain('at least one service');
+    expect(
+      validateComposeYaml('services:\n  web:\n    image: alpine:3\n    ports: "80:80"\n').message,
+    ).toContain('"ports" must be a list');
+  });
+
+  it('retrieves Compose files, enforces CSRF/Origin on updates, and returns YAML validation errors before calling the agent', async () => {
+    const { app, fleet, transport, headers } = await setup();
+    await fleet.refreshAll();
+
+    // Retrieve compose file
+    const getRes = await app.inject(`/api/hosts/srv-1/containers/${containerId}/compose`);
+    expect(getRes.statusCode).toBe(200);
+    expect(getRes.headers.etag).toBe('"rev-initial"');
+    expect(getRes.json()).toMatchObject({
+      project: 'demo',
+      service: 'web',
+      fileName: 'docker-compose.yml',
+    });
+
+    // Reject missing CSRF on PUT
+    const noCsrf = await app.inject({
+      method: 'PUT',
+      url: `/api/hosts/srv-1/containers/${containerId}/compose`,
+      headers: { origin: headers.origin },
+      payload: {
+        requestId: '00000000-0000-4000-8000-000000000010',
+        content: 'services:\n  web:\n    image: alpine:3.20\n',
+        redeploy: false,
+      },
+    });
+    expect(noCsrf.statusCode).toBe(403);
+
+    // Reject invalid YAML before contacting the agent
+    const invalidYaml = await app.inject({
+      method: 'PUT',
+      url: `/api/hosts/srv-1/containers/${containerId}/compose`,
+      headers,
+      payload: {
+        requestId: '00000000-0000-4000-8000-000000000011',
+        content: 'services:\n  web:\n    image: [broken\n',
+        redeploy: false,
+      },
+    });
+    expect(invalidYaml.statusCode).toBe(400);
+    expect(invalidYaml.json().code).toBe('INVALID_COMPOSE_YAML');
+    expect(invalidYaml.json().message).toContain('Invalid YAML');
+    expect(transport.composeSaveCalls).toHaveLength(0);
+
+    // Reject removing the stack's own service
+    const missingService = await app.inject({
+      method: 'PUT',
+      url: `/api/hosts/srv-1/containers/${containerId}/compose`,
+      headers,
+      payload: {
+        requestId: '00000000-0000-4000-8000-000000000012',
+        content: 'services:\n  other:\n    image: alpine:3\n',
+        redeploy: false,
+      },
+    });
+    expect(missingService.statusCode).toBe(400);
+    expect(missingService.json().code).toBe('INVALID_COMPOSE_YAML');
+    expect(transport.composeSaveCalls).toHaveLength(0);
+  });
+
+  it('supports Save only and Save + Redeploy, logs modifications to audit.jsonl and verifies agent identity', async () => {
+    const { app, fleet, transport, headers, directory } = await setup();
+    await fleet.refreshAll();
+
+    // Save only
+    const saveOnly = await app.inject({
+      method: 'PUT',
+      url: `/api/hosts/srv-1/containers/${containerId}/compose`,
+      headers,
+      payload: {
+        requestId: '00000000-0000-4000-8000-000000000021',
+        content: 'services:\n  web:\n    image: alpine:3.20\n',
+        redeploy: false,
+        expectedRevision: '"rev-initial"',
+      },
+    });
+    expect(saveOnly.statusCode).toBe(200);
+    expect(saveOnly.json()).toMatchObject({
+      ok: true,
+      project: 'demo',
+      fileName: 'docker-compose.yml',
+      redeployed: false,
+    });
+
+    // Save + Redeploy
+    const saveRedeploy = await app.inject({
+      method: 'POST',
+      url: `/api/hosts/srv-1/containers/${containerId}/compose`,
+      headers,
+      payload: {
+        requestId: '00000000-0000-4000-8000-000000000022',
+        content: 'services:\n  web:\n    image: alpine:3.21\n',
+        redeploy: true,
+        expectedRevision: '"rev-1"',
+      },
+    });
+    expect(saveRedeploy.statusCode).toBe(200);
+    expect(saveRedeploy.json()).toMatchObject({
+      ok: true,
+      project: 'demo',
+      fileName: 'docker-compose.yml',
+      redeployed: true,
+    });
+
+    expect(transport.composeSaveCalls).toHaveLength(2);
+    expect(transport.composeSaveCalls[0]?.redeploy).toBe(false);
+    expect(transport.composeSaveCalls[1]?.redeploy).toBe(true);
+
+    // Check audit records
+    const auditRecords = (await readFile(join(directory, 'data', 'audit.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(auditRecords.map((r) => [r.action, r.result])).toEqual([
+      ['compose-save', 'pending'],
+      ['compose-save', 'success'],
+      ['compose-redeploy', 'pending'],
+      ['compose-redeploy', 'success'],
+    ]);
+
+    // Verify agent identity mismatch protection
+    transport.healthIds.set('srv-2', 'srv-1');
+    const mismatchGet = await app.inject(`/api/hosts/srv-2/containers/${containerId}/compose`);
+    expect(mismatchGet.statusCode).toBe(502);
+    expect(mismatchGet.json().code).toBe('AGENT_IDENTITY_MISMATCH');
+
+    // Reject standalone containers that do not originate from Compose
+    const nonComposeSnap = snapshot();
+    nonComposeSnap.containers[0]!.composeProject = null;
+    nonComposeSnap.containers[0]!.composeService = null;
+    transport.snapshots.set('srv-1', nonComposeSnap);
+    await fleet.refreshHost('srv-1');
+    const nonComposeRes = await app.inject(`/api/hosts/srv-1/containers/${containerId}/compose`);
+    expect(nonComposeRes.statusCode).toBe(404);
+    expect(nonComposeRes.json().code).toBe('COMPOSE_NOT_FOUND');
   });
 });

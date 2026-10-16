@@ -173,6 +173,13 @@ try {
   composeFile = join(dir, 'compose.json');
   const services = {};
   const fixedPorts = { one: await freePort(), two: await freePort() };
+  const stacksDir = join(dir, 'stacks', 'integration');
+  await mkdir(stacksDir, { recursive: true });
+  await writeFile(
+    join(stacksDir, 'docker-compose.yml'),
+    'services:\n  worker:\n    image: alpine:3.23\n',
+    'utf8',
+  );
   for (const side of ['one', 'two']) {
     services[`engine-${side}`] = {
       image: 'docker:29-dind',
@@ -194,8 +201,9 @@ try {
         AGENT_ALLOWED_CLIENT_NAMES: 'test-backend',
         AGENT_MAX_STREAMS: '2',
         AGENT_STREAM_SECONDS: '60',
+        AGENT_COMPOSE_DIR: '/test/stacks',
       },
-      volumes: [`socket-${side}:/docker-run:ro`, `${dir.replaceAll('\\', '/')}:/test:ro`],
+      volumes: [`socket-${side}:/docker-run:ro`, `${dir.replaceAll('\\', '/')}:/test`],
       ports: ['127.0.0.1::9443'],
       networks: ['test'],
       depends_on: [`engine-${side}`],
