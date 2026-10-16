@@ -63,6 +63,7 @@ services:
       AGENT_MAX_LINE_BYTES: 65536
       AGENT_MAX_TAIL: 5000
       AGENT_STREAM_SECONDS: 600
+      AGENT_COMPOSE_DIR: ${AGENT_COMPOSE_DIR:-}
       HEALTHCHECK_SERVER_NAME: ${LOCAL_AGENT_TLS_NAME:-local-agent}
     volumes:
       # Socket access grants administrative Docker API access even with :ro.

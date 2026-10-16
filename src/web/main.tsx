@@ -23,6 +23,7 @@ import {
   CircleAlert,
   Settings2,
   ExternalLink,
+  FileCode,
 } from 'lucide-react';
 import type {
   Action,
@@ -36,6 +37,7 @@ import type {
   Volume,
 } from '../shared/types.js';
 import { api, configuration, resources, session, type Session } from './api.js';
+import { ComposeEditor } from './compose-editor.js';
 import './style.css';
 
 type Tab = 'containers' | 'images' | 'volumes' | 'hosts';
@@ -90,6 +92,7 @@ function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState<Record<string, Action>>({});
   const [logTarget, setLogTarget] = useState<Container | null>(null);
+  const [composeTarget, setComposeTarget] = useState<Container | null>(null);
   const [editHost, setEditHost] = useState<HostConfig | 'new' | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
   const load = useCallback(async () => {
@@ -312,6 +315,7 @@ function App() {
               onClick={() => {
                 setTab(t.id);
                 setLogTarget(null);
+                setComposeTarget(null);
               }}
               aria-current={tab === t.id ? 'page' : undefined}
             >
@@ -573,6 +577,17 @@ function App() {
                             >
                               <ScrollText size={15} />
                             </button>
+                            {row.composeProject && (
+                              <button
+                                className="icon-button"
+                                title={`Edit Compose for ${row.name} on ${hostName(row.hostId)}`}
+                                aria-label={`Edit Compose for ${row.name} on ${hostName(row.hostId)}`}
+                                disabled={disabled}
+                                onClick={() => setComposeTarget(row)}
+                              >
+                                <FileCode size={15} />
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
@@ -753,6 +768,18 @@ function App() {
           hostName={hostName(logTarget.hostId)}
           config={config}
           onClose={() => setLogTarget(null)}
+        />
+      )}
+      {composeTarget && (
+        <ComposeEditor
+          target={composeTarget}
+          hostName={hostName(composeTarget.hostId)}
+          onClose={() => setComposeTarget(null)}
+          onSaved={async (message) => {
+            setError('');
+            setNotice(message);
+            await load();
+          }}
         />
       )}
       {editHost && config && (

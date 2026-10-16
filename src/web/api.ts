@@ -1,4 +1,9 @@
-import type { PublicConfig, Resources } from '../shared/types.js';
+import type {
+  ComposeFileResponse,
+  ComposeSaveResponse,
+  PublicConfig,
+  Resources,
+} from '../shared/types.js';
 export interface Session {
   user: string;
   csrfToken: string;
@@ -63,5 +68,41 @@ export const configuration = async () => {
     typeof value.revision !== 'string'
   )
     throw new Error('The application returned invalid configuration data.');
+  return value;
+};
+export const getCompose = async (hostId: string, containerId: string) => {
+  const value = await api<ComposeFileResponse>(
+    `/hosts/${encodeURIComponent(hostId)}/containers/${encodeURIComponent(containerId)}/compose`,
+  );
+  if (
+    !value ||
+    typeof value.project !== 'string' ||
+    typeof value.fileName !== 'string' ||
+    typeof value.content !== 'string' ||
+    typeof value.revision !== 'string'
+  )
+    throw new Error('The application returned invalid Compose file data.');
+  return value;
+};
+export const saveCompose = async (
+  hostId: string,
+  containerId: string,
+  payload: {
+    requestId: string;
+    content: string;
+    redeploy: boolean;
+    expectedRevision?: string;
+  },
+) => {
+  const value = await api<ComposeSaveResponse>(
+    `/hosts/${encodeURIComponent(hostId)}/containers/${encodeURIComponent(containerId)}/compose`,
+    {
+      method: 'PUT',
+      headers: payload.expectedRevision ? { 'If-Match': payload.expectedRevision } : {},
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!value || value.ok !== true || typeof value.revision !== 'string')
+    throw new Error('The application returned an invalid Compose save response.');
   return value;
 };

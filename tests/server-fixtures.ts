@@ -2,11 +2,19 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Readable } from 'node:stream';
-import type { AppConfig, HostConfig, Snapshot, Stats } from '../src/shared/types.js';
+import type {
+  AppConfig,
+  ComposeFileResponse,
+  ComposeSaveResponse,
+  HostConfig,
+  Snapshot,
+  Stats,
+} from '../src/shared/types.js';
 import type { AgentTransport } from '../src/server/agent-client.js';
 
 export const containerId = 'a'.repeat(64);
 export const otherId = 'b'.repeat(64);
+export const defaultComposeContent = `services:\n  web:\n    image: alpine:3\n`;
 export function snapshot(id = containerId): Snapshot {
   return {
     containers: [
@@ -54,11 +62,23 @@ export function snapshot(id = containerId): Snapshot {
 export class FakeTransport implements AgentTransport {
   actionCalls: { host: string; id: string; action: string; requestId: string; actor: string }[] =
     [];
+  composeGetCalls: { host: string; id: string }[] = [];
+  composeSaveCalls: {
+    host: string;
+    id: string;
+    requestId: string;
+    actor: string;
+    content: string;
+    redeploy: boolean;
+    expectedRevision?: string;
+  }[] = [];
   snapshotCalls: string[] = [];
   failHosts = new Set<string>();
   healthIds = new Map<string, string>();
   snapshots = new Map<string, Snapshot>();
+  composeFiles = new Map<string, ComposeFileResponse>();
   actionFailure: Error | undefined;
+  composeFailure: Error | undefined;
   actionWait: Promise<void> | undefined;
   streamFactory: () => Readable = () =>
     Readable.from([
@@ -80,6 +100,49 @@ export class FakeTransport implements AgentTransport {
     this.actionCalls.push({ host: host.id, id, action, requestId, actor });
     if (this.actionWait) await this.actionWait;
     if (this.actionFailure) throw this.actionFailure;
+  }
+  async getCompose(host: HostConfig, id: string): Promise<ComposeFileResponse> {
+    this.composeGetCalls.push({ host: host.id, id });
+    if (this.composeFailure) throw this.composeFailure;
+    return structuredClone(
+      this.composeFiles.get(`${host.id}:${id}`) || {
+        project: 'demo',
+        service: 'web',
+        fileName: 'docker-compose.yml',
+        content: defaultComposeContent,
+        revision: '"rev-initial"',
+      },
+    );
+  }
+  async saveCompose(
+    host: HostConfig,
+    id: string,
+    input: {
+      requestId: string;
+      actor: string;
+      content: string;
+      redeploy: boolean;
+      expectedRevision?: string;
+    },
+  ): Promise<ComposeSaveResponse> {
+    this.composeSaveCalls.push({ host: host.id, id, ...input });
+    if (this.actionWait) await this.actionWait;
+    if (this.composeFailure) throw this.composeFailure;
+    const nextRevision = `"rev-${this.composeSaveCalls.length}"`;
+    this.composeFiles.set(`${host.id}:${id}`, {
+      project: 'demo',
+      service: 'web',
+      fileName: 'docker-compose.yml',
+      content: input.content,
+      revision: nextRevision,
+    });
+    return {
+      ok: true,
+      project: 'demo',
+      fileName: 'docker-compose.yml',
+      revision: nextRevision,
+      redeployed: input.redeploy,
+    };
   }
   async logs(_host: HostConfig, _id: string, _tail: number, _follow: boolean, signal: AbortSignal) {
     const stream = this.streamFactory();

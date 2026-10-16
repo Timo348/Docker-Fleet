@@ -6,7 +6,8 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { Action } from '../shared/types.js';
+import { sanitizeComposeContent, validateComposeYaml } from '../shared/compose.js';
+import type { Action, ComposeSaveResponse } from '../shared/types.js';
 import { AgentError, ApiError } from './errors.js';
 import { ConfigStore } from './config.js';
 import { Authenticator, type Identity } from './auth.js';
@@ -17,7 +18,7 @@ import { LogStreams } from './logs.js';
 
 interface Operation {
   target: string;
-  promise: Promise<{ ok: true }>;
+  promise: Promise<{ ok: true } | ComposeSaveResponse>;
   expires: number;
 }
 export interface ServerOptions {
@@ -74,7 +75,7 @@ export async function createServer(options: ServerOptions = {}) {
       .header('cache-control', 'no-store')
       .header(
         'content-security-policy',
-        "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
       );
     if (request.url.split('?')[0] === '/healthz' && request.method === 'GET') return;
     const identity = authenticator.identity(request);
@@ -281,6 +282,194 @@ export async function createServer(options: ServerOptions = {}) {
       throw error;
     }
   });
+  app.get('/api/hosts/:hostId/containers/:id/compose', async (request, reply) => {
+    const { hostId, id } = params(request);
+    const host = fleet.host(hostId);
+    const known = fleet
+      .resources()
+      .containers.find((container) => container.hostId === hostId && container.id === id);
+    if (known && !known.composeProject)
+      throw new ApiError(
+        404,
+        'COMPOSE_NOT_FOUND',
+        'This container does not belong to a Docker Compose stack.',
+      );
+    const health = await transport.health(host);
+    if (health.hostId !== host.id || health.version !== 1)
+      throw new ApiError(
+        502,
+        'AGENT_IDENTITY_MISMATCH',
+        'The agent identity does not match the selected host.',
+      );
+    const composeFile = await transport.getCompose(host, id);
+    if (known?.composeProject && composeFile.project !== known.composeProject)
+      throw new ApiError(
+        403,
+        'COMPOSE_STACK_MISMATCH',
+        'The returned Compose file does not belong to the selected stack.',
+      );
+    reply.header('etag', composeFile.revision);
+    return composeFile;
+  });
+  const saveComposeHandler = async (
+    request: FastifyRequest,
+    reply: { header: (name: string, value: string) => unknown },
+  ) => {
+    const { hostId, id } = params(request);
+    const host = fleet.host(hostId);
+    const user = identity(request);
+    const body = request.body as Record<string, unknown> | undefined;
+    if (
+      !body ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      Object.keys(body).some(
+        (key) => !['requestId', 'content', 'redeploy', 'expectedRevision'].includes(key),
+      )
+    )
+      throw new ApiError(
+        400,
+        'INVALID_COMPOSE_REQUEST',
+        'Provide requestId, content and optional redeploy or expectedRevision.',
+      );
+    if (
+      typeof body.requestId !== 'string' ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(body.requestId)
+    )
+      throw new ApiError(400, 'INVALID_REQUEST_ID', 'Provide a unique requestId UUID.');
+    if (typeof body.content !== 'string')
+      throw new ApiError(400, 'INVALID_COMPOSE_YAML', 'Compose content must be a YAML string.');
+    const redeploy = body.redeploy === undefined ? false : body.redeploy;
+    if (typeof redeploy !== 'boolean')
+      throw new ApiError(400, 'INVALID_COMPOSE_REQUEST', 'redeploy must be a boolean.');
+    const headerMatch = request.headers['if-match'];
+    const expectedRevision =
+      typeof body.expectedRevision === 'string'
+        ? body.expectedRevision
+        : typeof headerMatch === 'string'
+          ? headerMatch
+          : undefined;
+    if (expectedRevision !== undefined && expectedRevision.length > 128)
+      throw new ApiError(400, 'INVALID_COMPOSE_REQUEST', 'expectedRevision is invalid.');
+
+    const validation = validateComposeYaml(body.content);
+    if (!validation.valid)
+      throw new ApiError(
+        400,
+        'INVALID_COMPOSE_YAML',
+        validation.message || 'The Compose file contains invalid YAML.',
+      );
+
+    const known = fleet
+      .resources()
+      .containers.find((container) => container.hostId === hostId && container.id === id);
+    if (known && !known.composeProject)
+      throw new ApiError(
+        404,
+        'COMPOSE_NOT_FOUND',
+        'This container does not belong to a Docker Compose stack.',
+      );
+    if (known?.composeService && !validation.services.includes(known.composeService))
+      throw new ApiError(
+        400,
+        'INVALID_COMPOSE_YAML',
+        `The Compose file must retain service "${known.composeService}" belonging to stack "${known.composeProject}".`,
+      );
+
+    const requestId = body.requestId;
+    const sanitizedContent = sanitizeComposeContent(body.content);
+    const auditAction = redeploy ? ('compose-redeploy' as const) : ('compose-save' as const);
+    const opKey = `${user.subject}\0${requestId}`;
+    const target = `${hostId}/${id}/${auditAction}`;
+    const resourceKey = `${hostId}/${id}`;
+    const prior = operations.get(opKey);
+    if (prior) {
+      if (prior.target !== target)
+        throw new ApiError(
+          409,
+          'REQUEST_ID_CONFLICT',
+          'This requestId was already used for another action.',
+        );
+      const cached = (await prior.promise) as ComposeSaveResponse;
+      reply.header('etag', cached.revision);
+      return cached;
+    }
+    if (busy.has(resourceKey))
+      throw new ApiError(
+        409,
+        'ACTION_IN_PROGRESS',
+        'Another action is already running for this container.',
+      );
+    for (const [key, operation] of operations)
+      if (operation.expires < Date.now()) operations.delete(key);
+    if (operations.size >= 10000)
+      throw new ApiError(429, 'ACTION_LIMIT', 'The action ledger is full. Try again later.');
+    busy.add(resourceKey);
+    const auditFields = {
+      user: user.username,
+      host: hostId,
+      containerId: id,
+      action: auditAction,
+      requestId,
+    };
+    const promise = (async (): Promise<ComposeSaveResponse> => {
+      try {
+        try {
+          await audit.record({ ...auditFields, result: 'pending' });
+        } catch {
+          throw new ApiError(
+            503,
+            'AUDIT_UNAVAILABLE',
+            'The Compose update was not executed because audit storage is unavailable. Check storage permissions and available space.',
+          );
+        }
+        let saved: ComposeSaveResponse;
+        try {
+          const health = await transport.health(host);
+          if (health.hostId !== host.id || health.version !== 1)
+            throw new ApiError(
+              502,
+              'AGENT_IDENTITY_MISMATCH',
+              'The agent identity does not match the selected host.',
+            );
+          saved = await transport.saveCompose(host, id, {
+            requestId,
+            actor: user.username,
+            content: sanitizedContent,
+            redeploy,
+            ...(expectedRevision ? { expectedRevision } : {}),
+          });
+        } catch (error) {
+          await audit
+            .record({
+              ...auditFields,
+              result: error instanceof AgentError && error.uncertain ? 'unknown' : 'failure',
+            })
+            .catch(() => undefined);
+          throw error;
+        }
+        try {
+          await audit.record({ ...auditFields, result: 'success' });
+        } catch {
+          throw new ApiError(
+            503,
+            'AUDIT_RESULT_UNKNOWN',
+            'The Compose update ran, but its audit result could not be persisted. Refresh the actual container state before another action.',
+          );
+        }
+        await fleet.refreshHost(hostId);
+        return saved;
+      } finally {
+        busy.delete(resourceKey);
+      }
+    })();
+    operations.set(opKey, { target, promise, expires: Date.now() + 86400000 });
+    const result = await promise;
+    reply.header('etag', result.revision);
+    return result;
+  };
+  app.put('/api/hosts/:hostId/containers/:id/compose', saveComposeHandler);
+  app.post('/api/hosts/:hostId/containers/:id/compose', saveComposeHandler);
   if (options.serveStatic !== false) {
     const webRoot = resolve(process.env.WEB_ROOT || 'dist-web');
     if (existsSync(webRoot)) {

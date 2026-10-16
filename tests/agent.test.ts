@@ -44,6 +44,7 @@ interface MockOptions {
   minApi?: string;
   actionDelay?: number;
   followOpen?: boolean;
+  labels?: Record<string, string>;
 }
 async function dockerFixture(options: MockOptions = {}) {
   const calls: string[] = [];
@@ -136,7 +137,7 @@ async function dockerFixture(options: MockOptions = {}) {
           Image: 'example/app:stable',
           Tty: options.tty ?? false,
           Env: ['SECRET=DO_NOT_RETURN'],
-          Labels: {
+          Labels: options.labels ?? {
             'com.docker.compose.project': 'example',
             'com.docker.compose.service': 'app',
             secret: 'DO_NOT_RETURN',
@@ -646,4 +647,228 @@ describe('agent mutual TLS trust boundary', () => {
     expect(JSON.parse(authorized.body)).toEqual({ hostId: 'host-a', version: 1 });
     expect(fixture.calls).toHaveLength(0);
   }, 15_000);
+});
+
+describe('agent Compose file retrieval, validation, redeploy and path traversal security', () => {
+  function tempDir(prefix: string): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    cleanup.push(() => {
+      if (!path.resolve(dir).startsWith(path.resolve(os.tmpdir()) + path.sep))
+        throw new Error('Unsafe test cleanup path');
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    return dir;
+  }
+
+  it('retrieves, validates, saves (save-only and save+redeploy) and protects against stale revisions', async () => {
+    const composeRoot = tempDir('docker-fleet-compose-');
+    const stackDir = path.join(composeRoot, 'example');
+    fs.mkdirSync(stackDir, { recursive: true });
+    const composeFilePath = path.join(stackDir, 'docker-compose.yml');
+    const initialYaml = 'services:\n  app:\n    image: example/app:stable\n';
+    fs.writeFileSync(composeFilePath, initialYaml, 'utf8');
+
+    const deployCalls: { cwd: string; filePath: string; project: string }[] = [];
+    const fixture = await dockerFixture({
+      labels: {
+        'com.docker.compose.project': 'example',
+        'com.docker.compose.service': 'app',
+        'com.docker.compose.project.working_dir': stackDir,
+        'com.docker.compose.project.config_files': composeFilePath,
+      },
+    });
+    const agent = await startAgent({
+      ...settings(fixture.socketPath),
+      composeDir: composeRoot,
+      composeRunner: async (ctx) => {
+        deployCalls.push({ cwd: ctx.cwd, filePath: ctx.filePath, project: ctx.project });
+      },
+    });
+
+    const getRes = await fetch(`${agent.baseUrl}/v1/containers/${runningId}/compose`);
+    expect(getRes.status).toBe(200);
+    const loaded = (await getRes.json()) as {
+      project: string;
+      service: string;
+      fileName: string;
+      content: string;
+      revision: string;
+    };
+    expect(loaded).toMatchObject({
+      project: 'example',
+      service: 'app',
+      fileName: 'docker-compose.yml',
+      content: initialYaml,
+    });
+
+    // Save only (redeploy: false)
+    const updatedYaml = 'services:\n  app:\n    image: example/app:2.0.0\n';
+    const saveOnlyRes = await fetch(`${agent.baseUrl}/v1/containers/${runningId}/compose`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        actor: 'admin',
+        content: updatedYaml,
+        redeploy: false,
+        expectedRevision: loaded.revision,
+      }),
+    });
+    expect(saveOnlyRes.status).toBe(200);
+    const saveOnlyBody = (await saveOnlyRes.json()) as {
+      ok: boolean;
+      revision: string;
+      redeployed: boolean;
+    };
+    expect(saveOnlyBody.ok).toBe(true);
+    expect(saveOnlyBody.redeployed).toBe(false);
+    expect(deployCalls).toHaveLength(0);
+    expect(fs.readFileSync(composeFilePath, 'utf8')).toBe(updatedYaml);
+
+    // Reject stale revision
+    const staleRes = await fetch(`${agent.baseUrl}/v1/containers/${runningId}/compose`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        actor: 'admin',
+        content: 'services:\n  app:\n    image: example/app:3.0.0\n',
+        redeploy: false,
+        expectedRevision: loaded.revision,
+      }),
+    });
+    expect(staleRes.status).toBe(409);
+    expect(await staleRes.json()).toMatchObject({ code: 'COMPOSE_CONFLICT' });
+
+    // Save + Redeploy (redeploy: true)
+    const redeployYaml = 'services:\n  app:\n    image: example/app:2.1.0\n';
+    const redeployRes = await fetch(`${agent.baseUrl}/v1/containers/${runningId}/compose`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        actor: 'admin',
+        content: redeployYaml,
+        redeploy: true,
+        expectedRevision: saveOnlyBody.revision,
+      }),
+    });
+    expect(redeployRes.status).toBe(200);
+    expect(await redeployRes.json()).toMatchObject({ ok: true, redeployed: true });
+    expect(deployCalls).toHaveLength(1);
+    expect(deployCalls[0]?.project).toBe('example');
+    expect(fs.readFileSync(composeFilePath, 'utf8')).toBe(redeployYaml);
+  });
+
+  it('rejects invalid YAML, missing services, and removing the container service from its stack', async () => {
+    const composeRoot = tempDir('docker-fleet-compose-invalid-');
+    const stackDir = path.join(composeRoot, 'example');
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stackDir, 'docker-compose.yml'),
+      'services:\n  app:\n    image: example/app:stable\n',
+      'utf8',
+    );
+    const fixture = await dockerFixture();
+    const agent = await startAgent({ ...settings(fixture.socketPath), composeDir: composeRoot });
+
+    for (const invalidContent of [
+      'services:\n  app:\n    image: [broken',
+      'version: "3.9"\n',
+      'services:\n  other-service:\n    image: alpine:3\n',
+    ]) {
+      const res = await fetch(`${agent.baseUrl}/v1/containers/${runningId}/compose`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requestId: randomUUID(),
+          content: invalidContent,
+          redeploy: false,
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ code: 'INVALID_COMPOSE_YAML' });
+    }
+  });
+
+  it('prevents path traversal, non-compose filenames, symlinks, and missing compose files', async () => {
+    const composeRoot = tempDir('docker-fleet-compose-sec-');
+    const outsideDir = tempDir('docker-fleet-outside-');
+    const secretFile = path.join(outsideDir, 'docker-compose.yml');
+    fs.writeFileSync(secretFile, 'services:\n  app:\n    image: secret\n', 'utf8');
+
+    // 1. Path traversal in working_dir / config_files
+    const traversalFixture = await dockerFixture({
+      labels: {
+        'com.docker.compose.project': 'example',
+        'com.docker.compose.service': 'app',
+        'com.docker.compose.project.working_dir': `${composeRoot}/../${path.basename(outsideDir)}`,
+        'com.docker.compose.project.config_files': '../docker-compose.yml',
+      },
+    });
+    const traversalAgent = await startAgent({
+      ...settings(traversalFixture.socketPath),
+      composeDir: composeRoot,
+    });
+    const traversalRes = await fetch(
+      `${traversalAgent.baseUrl}/v1/containers/${runningId}/compose`,
+    );
+    expect(traversalRes.status).toBe(403);
+    expect(await traversalRes.json()).toMatchObject({ code: 'COMPOSE_PATH_FORBIDDEN' });
+
+    // 2. Non-compose filename (.env / arbitrary file)
+    const stackDir = path.join(composeRoot, 'example');
+    fs.mkdirSync(stackDir, { recursive: true });
+    const envFile = path.join(stackDir, '.env');
+    fs.writeFileSync(envFile, 'SECRET=123\n', 'utf8');
+    const badFileFixture = await dockerFixture({
+      labels: {
+        'com.docker.compose.project': 'example',
+        'com.docker.compose.service': 'app',
+        'com.docker.compose.project.working_dir': stackDir,
+        'com.docker.compose.project.config_files': envFile,
+      },
+    });
+    const badFileAgent = await startAgent({
+      ...settings(badFileFixture.socketPath),
+      composeDir: composeRoot,
+    });
+    const badFileRes = await fetch(`${badFileAgent.baseUrl}/v1/containers/${runningId}/compose`);
+    expect(badFileRes.status).toBe(403);
+    expect(await badFileRes.json()).toMatchObject({ code: 'COMPOSE_PATH_FORBIDDEN' });
+
+    // 3. Symlink escape attempt
+    const symlinkPath = path.join(stackDir, 'docker-compose.yml');
+    fs.symlinkSync(secretFile, symlinkPath);
+    const symlinkFixture = await dockerFixture({
+      labels: {
+        'com.docker.compose.project': 'example',
+        'com.docker.compose.service': 'app',
+        'com.docker.compose.project.working_dir': stackDir,
+        'com.docker.compose.project.config_files': symlinkPath,
+      },
+    });
+    const symlinkAgent = await startAgent({
+      ...settings(symlinkFixture.socketPath),
+      composeDir: composeRoot,
+    });
+    const symlinkRes = await fetch(`${symlinkAgent.baseUrl}/v1/containers/${runningId}/compose`);
+    expect(symlinkRes.status).toBe(403);
+    expect(await symlinkRes.json()).toMatchObject({ code: 'COMPOSE_PATH_FORBIDDEN' });
+    fs.unlinkSync(symlinkPath);
+
+    // 4. Missing Compose file
+    const missingRes = await fetch(`${symlinkAgent.baseUrl}/v1/containers/${runningId}/compose`);
+    expect(missingRes.status).toBe(404);
+    expect(await missingRes.json()).toMatchObject({ code: 'COMPOSE_FILE_MISSING' });
+
+    // 5. Standalone container without com.docker.compose.project
+    const standaloneFixture = await dockerFixture({ labels: {} });
+    const standaloneAgent = await startAgent(settings(standaloneFixture.socketPath));
+    const standaloneRes = await fetch(
+      `${standaloneAgent.baseUrl}/v1/containers/${runningId}/compose`,
+    );
+    expect(standaloneRes.status).toBe(404);
+    expect(await standaloneRes.json()).toMatchObject({ code: 'COMPOSE_NOT_FOUND' });
+  });
 });

@@ -1,13 +1,13 @@
 import { mkdir, open, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Action } from '../shared/types.js';
+import type { AuditAction } from '../shared/types.js';
 
 export interface AuditEvent {
   time: string;
   user: string;
   host: string;
   containerId: string;
-  action: Action;
+  action: AuditAction;
   result: 'pending' | 'success' | 'failure' | 'unknown';
   requestId: string;
 }

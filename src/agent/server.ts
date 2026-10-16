@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import https from 'node:https';
 import { TLSSocket } from 'node:tls';
+import { MAX_COMPOSE_BYTES } from '../shared/compose.js';
 import type { Action, LogLine } from '../shared/types.js';
+import { ComposeManager, type ComposeRunner } from './compose.js';
 import { AgentError, DockerClient, readBounded } from './docker.js';
 import { Inventory, type DockerInspect } from './inventory.js';
 import { decodeLogLines } from './logs.js';
@@ -19,6 +21,8 @@ export interface AgentOptions {
   maxLineBytes: number;
   maxTail: number;
   streamSeconds: number;
+  composeDir?: string;
+  composeRunner?: ComposeRunner;
 }
 
 export function loadAgentOptions(env: NodeJS.ProcessEnv = process.env): AgentOptions {
@@ -68,11 +72,13 @@ export function loadAgentOptions(env: NodeJS.ProcessEnv = process.env): AgentOpt
       allowedClientNames: names,
     };
   }
+  const composeDir = env.AGENT_COMPOSE_DIR?.trim();
   return {
     hostId,
     bind,
     development,
     ...(tls ? { tls } : {}),
+    ...(composeDir ? { composeDir } : {}),
     port: integer('AGENT_PORT', 9443, 1, 65535),
     dockerSocket: env.DOCKER_SOCKET ?? '/var/run/docker.sock',
     maxStreams: integer('AGENT_MAX_STREAMS', 4, 1, 32),
@@ -240,6 +246,11 @@ export function createAgent(
   const docker = client ?? new DockerClient({ socketPath: options.dockerSocket });
   const inventory = new Inventory(docker, options.hostId);
   const actions = new Actions(docker, inventory);
+  const compose = new ComposeManager(docker, inventory, {
+    dockerSocket: options.dockerSocket,
+    ...(options.composeDir ? { composeDir: options.composeDir } : {}),
+    ...(options.composeRunner ? { composeRunner: options.composeRunner } : {}),
+  });
   let streams = 0,
     ordinaryRequests = 0;
   const activeStreams = new Set<AbortController>();
@@ -289,7 +300,7 @@ export function createAgent(
         sendJson(response, 200, await inventory.stats());
         return;
       }
-      const match = /^\/v1\/containers\/([a-f0-9]{64})\/(start|stop|restart|logs)$/.exec(
+      const match = /^\/v1\/containers\/([a-f0-9]{64})\/(start|stop|restart|logs|compose)$/.exec(
         url.pathname,
       );
       if (!match)
@@ -300,7 +311,61 @@ export function createAgent(
         );
       const id = match[1]!,
         action = match[2]!;
-      if (action !== 'logs' && request.method === 'POST') {
+      if (action === 'compose' && request.method === 'GET') {
+        if (url.search)
+          throw new AgentError('INVALID_INPUT', 'Compose query parameters are not allowed.', 400);
+        sendJson(response, 200, await compose.get(id));
+        return;
+      }
+      if (action === 'compose' && request.method === 'POST') {
+        if (url.search)
+          throw new AgentError('INVALID_INPUT', 'Compose query parameters are not allowed.', 400);
+        if (!request.headers['content-type']?.startsWith('application/json'))
+          throw new AgentError('INVALID_INPUT', 'Compose updates require application/json.', 415);
+        const raw = await readBounded(request, MAX_COMPOSE_BYTES + 4096);
+        let body: unknown;
+        try {
+          body = JSON.parse(raw.toString('utf8'));
+        } catch {
+          throw new AgentError('INVALID_INPUT', 'The Compose body must be valid JSON.', 400);
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body))
+          throw new AgentError('INVALID_INPUT', 'The Compose body must be an object.', 400);
+        const record = body as Record<string, unknown>;
+        if (
+          Object.keys(record).some(
+            (key) =>
+              !['requestId', 'actor', 'content', 'redeploy', 'expectedRevision'].includes(key),
+          ) ||
+          typeof record.requestId !== 'string' ||
+          !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(
+            record.requestId,
+          ) ||
+          typeof record.content !== 'string' ||
+          typeof record.redeploy !== 'boolean' ||
+          (record.actor !== undefined &&
+            (typeof record.actor !== 'string' || record.actor.length > 256)) ||
+          (record.expectedRevision !== undefined &&
+            (typeof record.expectedRevision !== 'string' || record.expectedRevision.length > 128))
+        )
+          throw new AgentError(
+            'INVALID_INPUT',
+            'A valid requestId UUID, content string, redeploy flag and only supported fields are required.',
+            400,
+          );
+        const saved = await compose.save(id, {
+          requestId: record.requestId,
+          content: record.content,
+          redeploy: record.redeploy,
+          ...(typeof record.actor === 'string' ? { actor: record.actor } : {}),
+          ...(typeof record.expectedRevision === 'string'
+            ? { expectedRevision: record.expectedRevision }
+            : {}),
+        });
+        sendJson(response, 200, saved);
+        return;
+      }
+      if (action !== 'logs' && action !== 'compose' && request.method === 'POST') {
         if (url.search)
           throw new AgentError('INVALID_INPUT', 'Action query parameters are not allowed.', 400);
         if (!request.headers['content-type']?.startsWith('application/json'))

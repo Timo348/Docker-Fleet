@@ -1,4 +1,5 @@
 export type Action = 'start' | 'stop' | 'restart';
+export type AuditAction = Action | 'compose-save' | 'compose-redeploy';
 export interface HostConfig {
   id: string;
   name: string;
@@ -121,4 +122,24 @@ export interface PublicConfig {
   baseUrl: string;
   auth: { mode: string };
   revision: string;
+}
+export interface ComposeFileResponse {
+  project: string;
+  service: string | null;
+  fileName: string;
+  content: string;
+  revision: string;
+}
+export interface ComposeSaveRequest {
+  requestId: string;
+  content: string;
+  redeploy: boolean;
+  expectedRevision?: string;
+}
+export interface ComposeSaveResponse {
+  ok: true;
+  project: string;
+  fileName: string;
+  revision: string;
+  redeployed: boolean;
 }
